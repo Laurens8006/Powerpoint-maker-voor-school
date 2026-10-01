@@ -1,1 +1,957 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <title>Presentatiemaker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 
+  <!-- Tailwind via CDN. De kleuren verwijzen naar CSS-variabelen, zodat licht/donker automatisch werkt. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            page:   'var(--bg)',
+            card:   'var(--card)',
+            ink:    'var(--ink)',
+            muted:  'var(--mut)',
+            line:   'var(--line)',
+            brand:  'var(--g)',   // groen
+            accent: 'var(--o)',   // oranje
+          },
+          fontFamily: {
+            body:  ['Calibri', 'Carlito', 'Segoe UI', 'system-ui', 'sans-serif'],
+            title: ['Cambria', 'Georgia', 'serif'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Alleen de thema-variabelen staan nog in gewone CSS (Tailwind kan die niet zelf definiëren). -->
+  <style>
+    :root {
+      --bg: #f4f7f7; --card: #ffffff; --ink: #22313a; --mut: #667780;
+      --line: #d9e3e3; --g: #1f5f5b; --o: #f28c6b;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+
+    /* Donker thema: automatisch via systeem, tenzij data-theme="light" is gezet */
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #10181b; --card: #182327; --ink: #e6eeee; --mut: #97a8ad; --line: #2b3a3f; --g: #5fb3ad;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #10181b; --card: #182327; --ink: #e6eeee; --mut: #97a8ad; --line: #2b3a3f; --g: #5fb3ad;
+    }
+  </style>
+</head>
+
+<body class="m-0 bg-page text-ink font-body text-[15px] leading-snug">
+
+  <!-- ============ KOPBALK ============ -->
+  <header class="flex flex-wrap items-center justify-between gap-2.5 px-5 py-3.5 border-b border-line bg-card">
+    <h1 class="m-0 text-xl text-brand font-title">Presentatiemaker</h1>
+    <div class="flex flex-wrap gap-2">
+      <button id="btn-import" class="btn">Project openen</button>
+      <button id="btn-export" class="btn">Project opslaan</button>
+      <button id="btn-download" class="btn bg-accent border-accent text-white font-bold">Download .pptx</button>
+      <input id="file-input" type="file" accept=".json" hidden>
+    </div>
+  </header>
+
+  <!-- ============ HOOFDINDELING: lijst | formulier | grote preview ============ -->
+  <main class="grid gap-4 px-5 py-4 max-w-[1400px] mx-auto grid-cols-1 min-[950px]:grid-cols-[210px_minmax(0,1fr)_minmax(0,1.2fr)]">
+
+    <!-- Kolom 1: slidelijst + slide toevoegen + documenteigenschappen -->
+    <section>
+      <div id="slide-list"></div>
+
+      <div class="panel">
+        <label class="field-label !mb-0">
+          Slide toevoegen
+          <select id="add-layout" class="field-input"></select>
+        </label>
+      </div>
+
+      <div class="panel mt-2.5">
+        <div class="font-bold mb-2 text-brand">Documenteigenschappen</div>
+        <label class="field-label">Auteur<input id="meta-author" class="field-input"></label>
+        <label class="field-label">Bedrijf<input id="meta-company" class="field-input"></label>
+        <label class="field-label !mb-0">Bewerkingstijd (minuten)
+          <input id="meta-minutes" type="number" min="0" step="1" class="field-input">
+        </label>
+      </div>
+    </section>
+
+    <!-- Kolom 2: formulier voor de geselecteerde slide -->
+    <section id="slide-form" class="panel"></section>
+
+    <!-- Kolom 3: grote preview -->
+    <section>
+      <div class="sticky top-3">
+        <div id="big-preview"></div>
+        <p class="text-muted text-[13px]">Voorbeeld van de geselecteerde slide.</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="hidden fixed left-1/2 -translate-x-1/2 bg-brand text-white px-3.5 py-2 rounded-lg"
+       style="bottom: calc(20px + env(safe-area-inset-bottom, 0px))"></div>
+
+<script>
+/* =====================================================================
+   INHOUD
+   1. Constanten (kleuren, iconen, slideformaat)
+   2. Bouwstenen voor slides (tekst, vorm, icoon, foto)
+   3. Layouts  <- hier voeg je nieuwe slidetypes toe
+   4. Toestand (state) opslaan en laden
+   5. Preview tekenen (HTML)
+   6. Lijst, formulier en metadata tekenen
+   7. Gebruikersacties (klikken, typen)
+   8. Afbeeldingshulpjes
+   9. Bestanden opslaan en .pptx exporteren
+   10. Starten
+   ===================================================================== */
+
+
+/* ---------------------------------------------------------------------
+   1. CONSTANTEN
+   --------------------------------------------------------------------- */
+
+// Kleuren voor in de slides (hex zonder #, zoals PowerPoint ze wil)
+const COLORS = {
+  green:  '1F5F5B',
+  orange: 'F28C6B',
+  ink:    '22313A',
+  mint:   'E6F2F0',
+  peach:  'FDEDE7',
+  white:  'FFFFFF',
+  softGreen: 'CFE3E0',
+};
+
+// Slidecanvas in inches (16:9). Alle posities hieronder zijn in inches.
+const SLIDE_WIDTH  = 10;
+const SLIDE_HEIGHT = 5.625;
+
+// Beschikbare iconen: SVG-paden op een 24x24 raster
+const ICONS = {
+  baby:    '<circle cx="12" cy="6" r="3"/><path d="M5 11c3 1.5 11 1.5 14 0M12 11v5M8 21l4-5 4 5"/>',
+  brain:   '<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 4.5A3.5 3.5 0 0 0 6 17a3 3 0 0 0 3 3M15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 4.5 3.5 3.5 0 0 1-2 5.5 3 3 0 0 1-3 3M12 4v16"/>',
+  heart:   '<path d="M12 21s-8-5.3-8-11a4.5 4.5 0 0 1 8-2.8A4.5 4.5 0 0 1 20 10c0 5.7-8 11-8 11z"/>',
+  run:     '<circle cx="14" cy="4.5" r="1.8"/><path d="M8 21l3-6-3-3 3-5 4 3h3M11 15l4 2 1 4"/>',
+  palette: '<path d="M12 3a9 9 0 1 0 0 18c1.5 0 2-1 1.5-2-.6-1.2.2-2.5 1.6-2.5H17a4 4 0 0 0 4-4c0-5-4-9.5-9-9.5z"/><circle cx="8" cy="10" r=".8"/><circle cx="12" cy="7.5" r=".8"/><circle cx="16" cy="10" r=".8"/>',
+  chat:    '<path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/>',
+  hand:    '<path d="M8 13V5a1.5 1.5 0 0 1 3 0v6M11 11V4a1.5 1.5 0 0 1 3 0v7M14 11V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-3l-2-3a1.5 1.5 0 0 1 2.5-1.5L8 15"/>',
+  users:   '<circle cx="8" cy="8" r="3"/><path d="M2 20c0-3 3-5 6-5s6 2 6 5M17 11a2.5 2.5 0 1 0 0-5M16 15c3 0 6 1.5 6 5"/>',
+  bulb:    '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z"/>',
+  book:    '<path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2 2 2 0 0 0 2 2h13"/>',
+  star:    '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
+};
+
+const STORAGE_KEY = 'pm1';
+const DEFAULT_META = { author: 'Piet', company: 'Powerpoint generator', minutes: 0 };
+const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const PPTX_LIBRARY_URLS = [
+  'https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundle.js',
+];
+
+
+/* ---------------------------------------------------------------------
+   2. BOUWSTENEN VOOR SLIDES
+   Elke bouwsteen is een eenvoudig object ("primitive"). Dezelfde lijst
+   wordt gebruikt voor de preview in de browser én voor het .pptx-bestand.
+   --------------------------------------------------------------------- */
+
+const background = (fill) => ({ kind: 'background', fill });
+
+const shape = (type, x, y, w, h, fill) => ({ kind: 'shape', type, x, y, w, h, fill });
+
+const icon = (name, x, y, w, h, color) => ({ kind: 'icon', name, x, y, w, h, color });
+
+const photo = (src, x, y, w, h) => ({ kind: 'photo', src, x, y, w, h });
+
+/**
+ * Tekstvak.
+ * opties: size (pt), bold, font ('Cambria'), color (hex), align ('c' = gecentreerd),
+ *         valign ('m' = midden, 'b' = onder, anders boven)
+ */
+const text = (x, y, w, h, content, options = {}) => ({ kind: 'text', x, y, w, h, text: content, ...options });
+
+
+/* ---------------------------------------------------------------------
+   3. LAYOUTS
+   --------------------------------------------------------------------- */
+
+// Gedeelde onderdelen -------------------------------------------------
+
+/** Kopregel met groen rondje, icoon en titel (bovenaan bijna elke slide) */
+function buildHeader(data) {
+  return [
+    background(COLORS.white),
+    shape('ellipse', 0.5, 0.4, 0.75, 0.75, COLORS.green),
+    icon(data.icon, 0.67, 0.57, 0.41, 0.41, COLORS.white),
+    text(1.45, 0.4, 8, 0.75, data.title, {
+      size: 30, bold: true, font: 'Cambria', color: COLORS.green, valign: 'm',
+    }),
+  ];
+}
+
+/** Drie genummerde voorbeeldregels (oranje cijfer + tekst) */
+function buildNumberedExamples(data, textWidth) {
+  const examples = [data.e1, data.e2, data.e3];
+  const firstRowY = 3.73;
+  const rowSpacing = 0.52;
+  const items = [];
+
+  examples.forEach((example, index) => {
+    const y = firstRowY + index * rowSpacing;
+    items.push(
+      shape('ellipse', 0.5, y, 0.36, 0.36, COLORS.orange),
+      text(0.5, y, 0.36, 0.36, String(index + 1), {
+        size: 13, bold: true, color: COLORS.white, align: 'c', valign: 'm',
+      }),
+      text(1, y - 0.05, textWidth, 0.46, example, { size: 13, color: COLORS.ink, valign: 'm' }),
+    );
+  });
+
+  return items;
+}
+
+// Veldgroepen die in meerdere layouts terugkomen
+const HEADER_FIELDS = [
+  { id: 'title', label: 'Titel', max: 45 },
+  { id: 'icon',  label: 'Icoon', type: 'icon' },
+  { id: 'h1',    label: 'Kop groen vlak', max: 35 },
+];
+
+const EXAMPLE_FIELDS = [
+  { id: 'h2', label: 'Kop voorbeelden', max: 35 },
+  { id: 'e1', label: 'Voorbeeld 1', max: 130 },
+  { id: 'e2', label: 'Voorbeeld 2', max: 130 },
+  { id: 'e3', label: 'Voorbeeld 3', max: 130 },
+];
+
+/*
+  NIEUWE LAYOUT TOEVOEGEN
+  Kopieer een blok hieronder en geef het een nieuwe sleutel. Pas aan:
+    label  = naam in het keuzemenu
+    fields = invoervelden in het formulier
+    sample = startwaarden voor een nieuwe slide
+    build  = functie die de bouwstenen teruggeeft (posities in inches)
+*/
+const LAYOUTS = {
+
+  title: {
+    label: 'Titelslide',
+    fields: [
+      { id: 'title', label: 'Titel', max: 45 },
+      { id: 'sub',   label: 'Ondertitel', max: 70 },
+      { id: 'icon',  label: 'Icoon', type: 'icon' },
+    ],
+    sample: { title: 'Titel van de presentatie', sub: 'Ondertitel', icon: 'baby' },
+    build: (data) => [
+      background(COLORS.green),
+      shape('ellipse', 6.9, 1.8, 2, 2, COLORS.orange),
+      icon(data.icon, 7.4, 2.3, 1, 1, COLORS.white),
+      text(0.8, 1.9, 5.7, 1.1, data.title, { size: 32, bold: true, font: 'Cambria', color: COLORS.white, valign: 'b' }),
+      text(0.8, 3.15, 5.7, 0.7, data.sub, { size: 14, color: COLORS.softGreen }),
+    ],
+  },
+
+  content: {
+    label: 'Uitleg + 3 voorbeelden + foto',
+    fields: [
+      { id: 'title', label: 'Titel', max: 45 },
+      { id: 'icon',  label: 'Icoon', type: 'icon' },
+      { id: 'h1',    label: 'Kop groen vlak', max: 35 },
+      { id: 'intro', label: 'Uitleg', type: 'area', max: 230 },
+      { id: 'h2',    label: 'Kop voorbeelden', max: 35 },
+      { id: 'e1',    label: 'Voorbeeld 1', max: 90 },
+      { id: 'e2',    label: 'Voorbeeld 2', max: 90 },
+      { id: 'e3',    label: 'Voorbeeld 3', max: 90 },
+      { id: 'photo', label: 'Foto', type: 'image' },
+    ],
+    sample: {
+      title: 'Titel van de slide', icon: 'brain', h1: 'Wat wordt ontwikkeld?',
+      intro: 'Korte uitleg over het onderwerp.', h2: '3 voorbeelden',
+      e1: 'Eerste voorbeeld', e2: 'Tweede voorbeeld', e3: 'Derde voorbeeld', photo: '',
+    },
+    build: (data) => [
+      ...buildHeader(data),
+      // Links: uitleg in mintgroen vlak
+      shape('round', 0.5, 1.4, 5.5, 1.75, COLORS.mint),
+      text(0.75, 1.5, 5, 0.35, data.h1, { size: 15, bold: true, color: COLORS.green, valign: 'm' }),
+      text(0.75, 1.88, 5, 1.2, data.intro, { size: 13, color: COLORS.ink }),
+      // Links onder: voorbeelden
+      text(0.5, 3.3, 5.5, 0.3, data.h2, { size: 15, bold: true, color: COLORS.green, valign: 'm' }),
+      ...buildNumberedExamples(data, 5),
+      // Rechts: foto op perzikkleurig vlak
+      shape('round', 6.4, 1.4, 3.1, 3.8, COLORS.peach),
+      photo(data.photo, 6.18, 2.19, 3.54, 2.06),
+    ],
+  },
+
+  info_ex: {
+    label: 'Uitleg + 3 voorbeelden (zonder foto)',
+    fields: [
+      ...HEADER_FIELDS,
+      { id: 'intro', label: 'Uitleg', type: 'area', max: 380 },
+      ...EXAMPLE_FIELDS,
+    ],
+    sample: {
+      title: 'Titel van de slide', icon: 'bulb', h1: 'Wat wordt ontwikkeld?',
+      intro: 'Korte uitleg over het onderwerp.', h2: '3 voorbeelden',
+      e1: 'Eerste voorbeeld', e2: 'Tweede voorbeeld', e3: 'Derde voorbeeld',
+    },
+    build: (data) => [
+      ...buildHeader(data),
+      shape('round', 0.5, 1.4, 9, 1.75, COLORS.mint),
+      text(0.75, 1.5, 8.5, 0.35, data.h1, { size: 15, bold: true, color: COLORS.green, valign: 'm' }),
+      text(0.75, 1.88, 8.5, 1.2, data.intro, { size: 13, color: COLORS.ink }),
+      text(0.5, 3.3, 9, 0.3, data.h2, { size: 15, bold: true, color: COLORS.green, valign: 'm' }),
+      ...buildNumberedExamples(data, 8.5),
+    ],
+  },
+
+  info: {
+    label: 'Alleen uitleg (zonder foto, zonder voorbeelden)',
+    fields: [
+      ...HEADER_FIELDS,
+      { id: 'intro', label: 'Uitleg (Enter = nieuwe alinea)', type: 'area', max: 800 },
+    ],
+    sample: {
+      title: 'Titel van de slide', icon: 'book', h1: 'Wat wordt ontwikkeld?',
+      intro: 'Uitleg over het onderwerp.',
+    },
+    build: (data) => [
+      ...buildHeader(data),
+      shape('round', 0.5, 1.4, 9, 3.8, COLORS.mint),
+      text(0.75, 1.55, 8.5, 0.4, data.h1, { size: 15, bold: true, color: COLORS.green, valign: 'm' }),
+      text(0.75, 2.05, 8.5, 2.95, data.intro, { size: 14, color: COLORS.ink }),
+    ],
+  },
+};
+
+
+/* ---------------------------------------------------------------------
+   4. TOESTAND (STATE)
+   --------------------------------------------------------------------- */
+
+let state = createDefaultState();
+let currentSlideIndex = 0;
+
+function createDefaultState() {
+  return {
+    slides: [
+      { layout: 'title',   data: { ...LAYOUTS.title.sample } },
+      { layout: 'content', data: { ...LAYOUTS.content.sample } },
+    ],
+    meta: { ...DEFAULT_META },
+  };
+}
+
+/** Haalt het laatst opgeslagen project uit de browser (als dat er is) */
+function loadStateFromBrowser() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    if (saved && saved.slides && saved.slides.length) state = saved;
+  } catch (error) { /* geen opslag beschikbaar: start met standaard project */ }
+  state.meta = { ...DEFAULT_META, ...state.meta };
+}
+
+function saveStateToBrowser() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (error) { /* negeren */ }
+}
+
+const getCurrentSlide = () => state.slides[currentSlideIndex];
+
+
+/* ---------------------------------------------------------------------
+   5. PREVIEW TEKENEN (HTML)
+   --------------------------------------------------------------------- */
+
+const $ = (id) => document.getElementById(id);
+
+/** Maakt tekst veilig om in HTML te zetten */
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** Zet de positie (in inches) om naar percentages binnen de slide */
+function positionStyle(p) {
+  return `left:${(p.x / SLIDE_WIDTH) * 100}%;top:${(p.y / SLIDE_HEIGHT) * 100}%;`
+       + `width:${(p.w / SLIDE_WIDTH) * 100}%;height:${(p.h / SLIDE_HEIGHT) * 100}%`;
+}
+
+function fontFamilyCss(primitive) {
+  return primitive.font === 'Cambria'
+    ? "Cambria,Georgia,serif"
+    : "Calibri,Carlito,'Segoe UI',sans-serif";
+}
+
+function previewShape(p) {
+  const radius = p.type === 'ellipse' ? '50%' : '1.2cqw';
+  return `<i class="absolute m-0" style="${positionStyle(p)};background:#${p.fill};border-radius:${radius}"></i>`;
+}
+
+function previewIcon(p) {
+  return `<svg class="absolute m-0" style="${positionStyle(p)}" viewBox="0 0 24 24" fill="none"
+            stroke="#${p.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[p.name] || ''}</svg>`;
+}
+
+function previewPhoto(p) {
+  if (p.src) {
+    return `<img class="absolute m-0 object-cover" style="${positionStyle(p)}" src="${escapeHtml(p.src)}">`;
+  }
+  return `<div class="absolute m-0 flex items-center justify-center bg-[#ddd] text-[#777]"
+               style="${positionStyle(p)};font-size:3cqw">Foto</div>`;
+}
+
+function previewText(p) {
+  const fontSize = p.size / 7.2; // pt omgerekend naar % van de slidebreedte (cqw)
+  const justify = p.valign === 'm' ? 'center' : p.valign === 'b' ? 'flex-end' : 'flex-start';
+  const style = [
+    positionStyle(p),
+    `font-size:${fontSize}cqw`,
+    `color:#${p.color}`,
+    `font-weight:${p.bold ? 700 : 400}`,
+    `font-family:${fontFamilyCss(p)}`,
+    `text-align:${p.align === 'c' ? 'center' : 'left'}`,
+    `justify-content:${justify}`,
+  ].join(';');
+  return `<div class="absolute m-0 flex flex-col overflow-hidden whitespace-pre-line leading-[1.2]" style="${style}">${escapeHtml(p.text)}</div>`;
+}
+
+const PREVIEW_RENDERERS = {
+  shape: previewShape,
+  icon:  previewIcon,
+  photo: previewPhoto,
+  text:  previewText,
+};
+
+/** Zet de bouwstenen van één slide om naar HTML */
+function renderPrimitivesAsHtml(primitives) {
+  let backgroundColor = '#fff';
+  let html = '';
+
+  for (const p of primitives) {
+    if (p.kind === 'background') { backgroundColor = '#' + p.fill; continue; }
+    html += PREVIEW_RENDERERS[p.kind](p);
+  }
+
+  // "@container" zorgt dat cqw-eenheden meeschalen met de breedte van de slide
+  return `<div class="relative aspect-video overflow-hidden border border-line rounded-md [container-type:inline-size]"
+               style="background:${backgroundColor}">${html}</div>`;
+}
+
+const renderSlidePreview = (slide) => renderPrimitivesAsHtml(LAYOUTS[slide.layout].build(slide.data));
+
+
+/* ---------------------------------------------------------------------
+   6. LIJST, FORMULIER EN METADATA TEKENEN
+   --------------------------------------------------------------------- */
+
+function renderSlideList() {
+  $('slide-list').innerHTML = state.slides.map((slide, index) => {
+    const borderClass = index === currentSlideIndex ? 'border-accent' : 'border-transparent';
+    return `
+      <div class="slide-item relative block mb-2.5 border-2 rounded-lg cursor-pointer ${borderClass}" data-index="${index}">
+        ${renderSlidePreview(slide)}
+        <div class="text-xs text-muted mt-0.5 mb-1">${index + 1}. ${escapeHtml(LAYOUTS[slide.layout].label)}</div>
+        <div class="flex gap-1">
+          <button class="btn flex-1 !py-0.5" data-action="up"     data-index="${index}">↑</button>
+          <button class="btn flex-1 !py-0.5" data-action="down"   data-index="${index}">↓</button>
+          <button class="btn flex-1 !py-0.5" data-action="delete" data-index="${index}">✕</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderBigPreview() {
+  $('big-preview').innerHTML = renderSlidePreview(getCurrentSlide());
+}
+
+// --- Formuliervelden ---
+
+function renderLayoutPicker(slide) {
+  const options = Object.entries(LAYOUTS)
+    .map(([key, layout]) => `<option value="${key}" ${key === slide.layout ? 'selected' : ''}>${escapeHtml(layout.label)}</option>`)
+    .join('');
+  return `<label class="field-label">Layout<select id="layout-select" class="field-input">${options}</select></label>`;
+}
+
+function renderIconField(field, selectedIcon) {
+  const buttons = Object.keys(ICONS).map((name) => {
+    const stateClass = selectedIcon === name
+      ? 'bg-brand border-brand text-white'
+      : 'bg-page border-line text-ink';
+    return `<button type="button" class="aspect-square p-1.5 rounded-lg border cursor-pointer ${stateClass}"
+                    data-icon="${name}" data-field="${field.id}" title="${name}">
+              <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>
+            </button>`;
+  }).join('');
+
+  return `<label class="field-label">${field.label}
+            <div class="grid grid-cols-[repeat(auto-fill,minmax(42px,1fr))] gap-1.5 mt-1">${buttons}</div>
+          </label>`;
+}
+
+function renderImageField(field, currentValue) {
+  const removeButton = currentValue
+    ? `<button type="button" class="btn mt-1.5" data-remove-image="${field.id}">Foto verwijderen</button>`
+    : '';
+  return `<label class="field-label">${field.label}
+            <input type="file" accept="image/*" data-image-field="${field.id}" class="field-input">
+            ${removeButton}
+          </label>`;
+}
+
+function renderTextField(field, currentValue) {
+  const isTextarea = field.type === 'area';
+  const tag = isTextarea ? 'textarea' : 'input';
+  const tooLong = field.max && currentValue.length > field.max;
+  const counter = field.max
+    ? `<span id="count-${field.id}" class="float-right font-normal ${tooLong ? 'text-red-600' : ''}">${currentValue.length}/${field.max}</span>`
+    : '';
+  const attributes = `data-field="${field.id}" data-max="${field.max || 0}" class="field-input ${isTextarea ? 'min-h-[92px] resize-y' : ''}"`;
+  const control = isTextarea
+    ? `<textarea ${attributes}>${escapeHtml(currentValue)}</textarea>`
+    : `<input ${attributes} value="${escapeHtml(currentValue)}">`;
+
+  return `<label class="field-label">${field.label}${counter}${control}</label>`;
+}
+
+function renderFieldInput(field, slide) {
+  const value = slide.data[field.id] || '';
+  if (field.type === 'icon')  return renderIconField(field, value);
+  if (field.type === 'image') return renderImageField(field, value);
+  return renderTextField(field, value);
+}
+
+function renderForm() {
+  const slide = getCurrentSlide();
+  const fields = LAYOUTS[slide.layout].fields;
+  $('slide-form').innerHTML = renderLayoutPicker(slide) + fields.map((f) => renderFieldInput(f, slide)).join('');
+}
+
+function renderMeta() {
+  $('meta-author').value  = state.meta.author;
+  $('meta-company').value = state.meta.company;
+  $('meta-minutes').value = state.meta.minutes;
+}
+
+/**
+ * Alles opnieuw tekenen.
+ * redrawForm = true  -> ook formulier en metadata (bij wisselen van slide)
+ * redrawForm = false -> alleen previews (tijdens typen, zodat de cursor niet wegspringt)
+ */
+function refresh(redrawForm = false) {
+  saveStateToBrowser();
+  renderSlideList();
+  renderBigPreview();
+  if (redrawForm) {
+    renderForm();
+    renderMeta();
+  }
+}
+
+
+/* ---------------------------------------------------------------------
+   7. GEBRUIKERSACTIES
+   --------------------------------------------------------------------- */
+
+// --- Slides toevoegen, verplaatsen en verwijderen ---
+
+function addSlide(layoutKey) {
+  state.slides.push({ layout: layoutKey, data: { ...LAYOUTS[layoutKey].sample } });
+  currentSlideIndex = state.slides.length - 1;
+}
+
+function deleteSlide(index) {
+  if (state.slides.length <= 1) return; // er moet altijd minstens één slide blijven
+  state.slides.splice(index, 1);
+  currentSlideIndex = Math.min(currentSlideIndex, state.slides.length - 1);
+}
+
+function moveSlide(index, direction) {
+  const target = index + direction;
+  if (target < 0 || target >= state.slides.length) return;
+  const slides = state.slides;
+  [slides[index], slides[target]] = [slides[target], slides[index]];
+  currentSlideIndex = target;
+}
+
+function handleSlideListClick(event) {
+  const item = event.target.closest('.slide-item');
+  if (!item) return;
+  const index = Number(item.dataset.index);
+  const button = event.target.closest('button');
+
+  if (!button) {
+    currentSlideIndex = index; // gewoon op de slide geklikt
+  } else if (button.dataset.action === 'delete') {
+    deleteSlide(index);
+  } else if (button.dataset.action === 'up') {
+    moveSlide(index, -1);
+  } else if (button.dataset.action === 'down') {
+    moveSlide(index, +1);
+  }
+  refresh(true);
+}
+
+function handleAddLayoutChange(event) {
+  const layoutKey = event.target.value;
+  if (!layoutKey) return;
+  addSlide(layoutKey);
+  event.target.value = '';
+  refresh(true);
+}
+
+function fillAddLayoutMenu() {
+  const options = Object.entries(LAYOUTS)
+    .map(([key, layout]) => `<option value="${key}">${escapeHtml(layout.label)}</option>`)
+    .join('');
+  $('add-layout').innerHTML = `<option value="">Kies een layout…</option>${options}`;
+}
+
+// --- Formulier ---
+
+/** Tijdens typen: waarde opslaan, teller bijwerken, alleen previews verversen */
+function handleFormInput(event) {
+  const input = event.target;
+  const fieldId = input.dataset.field;
+  if (!fieldId) return;
+
+  getCurrentSlide().data[fieldId] = input.value;
+
+  const max = Number(input.dataset.max);
+  const counter = $('count-' + fieldId);
+  if (counter) {
+    counter.textContent = `${input.value.length}/${max}`;
+    counter.classList.toggle('text-red-600', input.value.length > max);
+  }
+  refresh(false);
+}
+
+function handleFormChange(event) {
+  const input = event.target;
+
+  if (input.id === 'layout-select') {
+    changeLayoutOfCurrentSlide(input.value);
+  } else if (input.dataset.imageField && input.files[0]) {
+    uploadPhoto(input.dataset.imageField, input.files[0]);
+  }
+}
+
+/** Layout wisselen: bestaande tekst blijft behouden, ontbrekende velden krijgen een voorbeeldwaarde */
+function changeLayoutOfCurrentSlide(newLayoutKey) {
+  const slide = getCurrentSlide();
+  slide.layout = newLayoutKey;
+  slide.data = { ...LAYOUTS[newLayoutKey].sample, ...slide.data };
+  refresh(true);
+}
+
+function uploadPhoto(fieldId, file) {
+  const reader = new FileReader();
+  reader.onload = async () => {
+    getCurrentSlide().data[fieldId] = await shrinkImage(reader.result);
+    refresh(true);
+  };
+  reader.readAsDataURL(file);
+}
+
+function handleFormClick(event) {
+  const button = event.target.closest('button');
+  if (!button) return;
+
+  if (button.dataset.icon) {
+    getCurrentSlide().data[button.dataset.field] = button.dataset.icon;
+    refresh(true);
+  } else if (button.dataset.removeImage) {
+    getCurrentSlide().data[button.dataset.removeImage] = '';
+    refresh(true);
+  }
+}
+
+// --- Documenteigenschappen ---
+
+function bindMetaInputs() {
+  $('meta-author').oninput  = (e) => { state.meta.author  = e.target.value; saveStateToBrowser(); };
+  $('meta-company').oninput = (e) => { state.meta.company = e.target.value; saveStateToBrowser(); };
+  $('meta-minutes').oninput = (e) => {
+    state.meta.minutes = Math.max(0, Math.floor(Number(e.target.value)) || 0);
+    saveStateToBrowser();
+  };
+}
+
+// --- Project openen en opslaan (JSON) ---
+
+function isValidProject(project) {
+  return project && Array.isArray(project.slides) && project.slides.every((s) => LAYOUTS[s.layout]);
+}
+
+function handleProjectFileChosen(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const project = JSON.parse(reader.result);
+      if (!isValidProject(project)) throw new Error('ongeldig');
+      state = project;
+      state.meta = { ...DEFAULT_META, ...state.meta };
+      currentSlideIndex = 0;
+      refresh(true);
+    } catch (error) {
+      showToast('Ongeldig projectbestand');
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = ''; // zodat hetzelfde bestand opnieuw gekozen kan worden
+}
+
+const saveProjectAsJson = () =>
+  saveFile(new Blob([JSON.stringify(state)], { type: 'application/json' }), 'presentatie.json');
+
+
+/* ---------------------------------------------------------------------
+   8. AFBEELDINGSHULPJES
+   --------------------------------------------------------------------- */
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+/** Verkleint een foto tot maximaal 1400 px, zodat het projectbestand klein blijft */
+async function shrinkImage(src) {
+  const image = await loadImage(src);
+  const scale = Math.min(1, 1400 / Math.max(image.width, image.height));
+  const canvas = document.createElement('canvas');
+  canvas.width  = Math.round(image.width * scale);
+  canvas.height = Math.round(image.height * scale);
+  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.88);
+}
+
+/** Snijdt een foto bij (zoals object-fit: cover) naar de verhouding van het vak in de slide */
+async function cropToCover(src, widthInches, heightInches) {
+  const PIXELS_PER_INCH = 200;
+  const image = await loadImage(src);
+  const canvas = document.createElement('canvas');
+  canvas.width  = Math.round(widthInches * PIXELS_PER_INCH);
+  canvas.height = Math.round(heightInches * PIXELS_PER_INCH);
+
+  const scale = Math.max(canvas.width / image.width, canvas.height / image.height);
+  const drawWidth  = image.width * scale;
+  const drawHeight = image.height * scale;
+  canvas.getContext('2d').drawImage(
+    image, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight,
+  );
+  return canvas.toDataURL('image/jpeg', 0.9);
+}
+
+/** Zet een icoon om naar een PNG (PowerPoint kan geen losse SVG-paden tekenen) */
+async function iconToPng(name, color) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 24 24" fill="none"
+                 stroke="#${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>`;
+  const image = await loadImage('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg));
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 256;
+  canvas.getContext('2d').drawImage(image, 0, 0, 256, 256);
+  return canvas.toDataURL('image/png');
+}
+
+
+/* ---------------------------------------------------------------------
+   9. BESTANDEN OPSLAAN EN .PPTX EXPORTEREN
+   --------------------------------------------------------------------- */
+
+let toastTimer;
+function showToast(message) {
+  const toast = $('toast');
+  toast.textContent = message;
+  toast.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.add('hidden'), 2800);
+}
+
+/** Slaat een bestand op: via de Claude-downloadfunctie als die er is, anders als gewone download */
+async function saveFile(blob, filename) {
+  let downloads = null;
+  try { downloads = window.claude && await claude.use('downloads'); } catch (error) { /* niet beschikbaar */ }
+
+  if (downloads) {
+    try {
+      await downloads.save({ filename, data: blob });
+    } catch (error) {
+      if (!error || error.code !== 'declined') showToast('Opslaan mislukt');
+    }
+    return;
+  }
+
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+}
+
+/** Laadt de PowerPoint-bibliotheek (probeert meerdere bronnen) */
+async function ensurePptxLibrary() {
+  for (const url of PPTX_LIBRARY_URLS) {
+    if (window.PptxGenJS) return true;
+    await new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.src = url;
+      script.onload = script.onerror = resolve;
+      document.head.appendChild(script);
+    });
+  }
+  return Boolean(window.PptxGenJS);
+}
+
+/** Zet de bewerkingstijd in het .pptx-bestand (docProps/app.xml) */
+async function stampEditingTime(buffer, minutes) {
+  const plainBlob = () => new Blob([buffer], { type: PPTX_MIME });
+  if (!window.JSZip) return plainBlob();
+
+  const zip = await JSZip.loadAsync(buffer);
+  const appXml = zip.file('docProps/app.xml');
+  if (!appXml) return plainBlob();
+
+  const xml = (await appXml.async('string')).replace(/<TotalTime>\d*<\/TotalTime>/, `<TotalTime>${minutes}</TotalTime>`);
+  zip.file('docProps/app.xml', xml);
+  return zip.generateAsync({ type: 'blob', mimeType: PPTX_MIME, compression: 'DEFLATE' });
+}
+
+/** Voegt één bouwsteen toe aan een PowerPoint-slide */
+async function addPrimitiveToPptxSlide(pptxSlide, p) {
+  const position = { x: p.x, y: p.y, w: p.w, h: p.h };
+
+  switch (p.kind) {
+    case 'background':
+      pptxSlide.background = { color: p.fill };
+      break;
+
+    case 'shape': {
+      const shapeName = p.type === 'ellipse' ? 'ellipse' : p.type === 'round' ? 'roundRect' : 'rect';
+      pptxSlide.addShape(shapeName, {
+        ...position,
+        fill: { color: p.fill },
+        line: { type: 'none' },
+        ...(p.type === 'round' ? { rectRadius: 0.12 } : {}),
+      });
+      break;
+    }
+
+    case 'text':
+      pptxSlide.addText(p.text || '', {
+        ...position,
+        fontFace: p.font || 'Calibri',
+        fontSize: p.size,
+        bold: Boolean(p.bold),
+        color: p.color,
+        align: p.align === 'c' ? 'center' : 'left',
+        valign: p.valign === 'm' ? 'middle' : p.valign === 'b' ? 'bottom' : 'top',
+        margin: 0,
+        isTextBox: true,
+      });
+      break;
+
+    case 'icon':
+      pptxSlide.addImage({ data: await iconToPng(p.name, p.color), ...position });
+      break;
+
+    case 'photo':
+      if (p.src) pptxSlide.addImage({ data: await cropToCover(p.src, p.w, p.h), ...position });
+      break;
+  }
+}
+
+async function downloadPptx() {
+  const button = $('btn-download');
+  button.disabled = true;
+
+  if (!await ensurePptxLibrary()) {
+    showToast('PowerPoint-bibliotheek niet geladen');
+    button.disabled = false;
+    return;
+  }
+
+  try {
+    const pptx = new PptxGenJS();
+    pptx.layout  = 'LAYOUT_16x9';
+    pptx.author  = state.meta.author;
+    pptx.company = state.meta.company;
+    pptx.title   = state.slides[0].data.title || 'Presentatie';
+
+    for (const slide of state.slides) {
+      const pptxSlide = pptx.addSlide();
+      for (const primitive of LAYOUTS[slide.layout].build(slide.data)) {
+        await addPrimitiveToPptxSlide(pptxSlide, primitive);
+      }
+    }
+
+    const buffer = await pptx.write({ outputType: 'arraybuffer' });
+    await saveFile(await stampEditingTime(buffer, state.meta.minutes), 'presentatie.pptx');
+  } catch (error) {
+    console.error(error);
+    showToast('Er ging iets mis bij het maken van de pptx');
+  }
+
+  button.disabled = false;
+}
+
+
+/* ---------------------------------------------------------------------
+   10. STARTEN
+   --------------------------------------------------------------------- */
+
+function init() {
+  loadStateFromBrowser();
+  fillAddLayoutMenu();
+  bindMetaInputs();
+
+  $('slide-list').onclick  = handleSlideListClick;
+  $('add-layout').onchange = handleAddLayoutChange;
+  $('slide-form').oninput  = handleFormInput;
+  $('slide-form').onchange = handleFormChange;
+  $('slide-form').onclick  = handleFormClick;
+
+  $('btn-download').onclick = downloadPptx;
+  $('btn-export').onclick   = saveProjectAsJson;
+  $('btn-import').onclick   = () => $('file-input').click();
+  $('file-input').onchange  = handleProjectFileChosen;
+
+  ensurePptxLibrary(); // alvast laden, zodat downloaden sneller gaat
+  refresh(true);
+}
+
+init();
+</script>
+
+<!-- Herbruikbare Tailwind-componenten (knoppen, panelen, invoervelden) -->
+<style type="text/tailwindcss">
+  @layer components {
+    .btn         { @apply border border-line bg-card rounded-lg px-3 py-[7px] cursor-pointer hover:border-brand; }
+    .panel       { @apply bg-card border border-line rounded-xl p-3; }
+    .field-label { @apply block mb-3 font-bold text-[13px] text-muted; }
+    .field-input { @apply block w-full mt-1 px-[9px] py-[7px] border border-line rounded-lg bg-page text-ink font-normal; }
+  }
+</style>
+</body>
+</html>
